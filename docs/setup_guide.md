@@ -181,6 +181,11 @@ To set workflow variables in n8n:
 1. Go to **Settings → Variables**.
 2. Add each variable with its value.
 
+> **Note:** The workflow uses `$vars.<NAME>` to reference these values, which reads from n8n's
+> built-in **Workflow Variables** store (Settings → Variables). If you prefer to inject them as
+> OS-level environment variables into the n8n process, change the expressions to `$env.<NAME>`.
+> Both approaches work; workflow variables are recommended for portability.
+
 ---
 
 ## 6. Import the Workflow

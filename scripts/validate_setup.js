@@ -162,10 +162,11 @@ async function checkSalesforce() {
       pass(`Salesforce authentication successful (instance: ${data.instance_url})`);
 
       // Verify the default owner ID exists
+      const SF_API_VERSION = process.env.SALESFORCE_API_VERSION || 'v59.0';
       const ownerId = process.env.SALESFORCE_DEFAULT_OWNER_ID;
       if (ownerId) {
         const userRes = await request(
-          `${data.instance_url}/services/data/v59.0/sobjects/User/${ownerId}`,
+          `${data.instance_url}/services/data/${SF_API_VERSION}/sobjects/User/${ownerId}`,
           {
             method: 'GET',
             headers: { Authorization: `Bearer ${data.access_token}` },

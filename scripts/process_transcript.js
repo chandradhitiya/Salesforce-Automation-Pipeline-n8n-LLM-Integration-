@@ -103,7 +103,7 @@ async function main() {
     transcript = fs.readFileSync(filePath, 'utf8');
     console.log(`📄  Loaded transcript from: ${filePath} (${transcript.length} chars)`);
   } else if (args.stdin) {
-    transcript = fs.readFileSync('/dev/stdin', 'utf8');
+    transcript = fs.readFileSync(0, 'utf8');  // fd 0 = stdin (cross-platform)
     console.log(`📄  Loaded transcript from stdin (${transcript.length} chars)`);
   } else if (args.text) {
     transcript = args.text;

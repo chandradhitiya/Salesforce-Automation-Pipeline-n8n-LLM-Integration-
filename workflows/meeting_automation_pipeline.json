@@ -1,0 +1,581 @@
+{
+  "name": "Meeting Transcript to Salesforce Task Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "notes": "Polls Google Calendar every 5 minutes for recently ended meetings"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "calendar": {
+          "__rl": true,
+          "value": "={{ $vars.GOOGLE_CALENDAR_ID }}",
+          "mode": "id"
+        },
+        "timeMin": "={{ $now.minus(10, 'minutes').toISO() }}",
+        "timeMax": "={{ $now.toISO() }}",
+        "additionalFields": {
+          "singleEvents": true,
+          "orderBy": "startTime"
+        }
+      },
+      "id": "google-calendar-fetch",
+      "name": "Fetch Recently Ended Meetings",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [460, 300],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "google-calendar-creds",
+          "name": "Google Calendar OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-transcript",
+              "leftValue": "={{ $json.description }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "filter-meetings-with-transcripts",
+      "name": "Filter: Has Transcript",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are an intelligent meeting analyst. Your task is to analyze meeting transcripts and extract structured information.\n\nFor each transcript, you must return a valid JSON object with the following structure:\n{\n  \"meeting_summary\": \"A concise 2-3 sentence summary of the meeting\",\n  \"key_insights\": [\"insight 1\", \"insight 2\", ...],\n  \"action_items\": [\n    {\n      \"title\": \"Task title (clear and actionable)\",\n      \"description\": \"Detailed description of what needs to be done\",\n      \"assignee_name\": \"Full name of the person responsible\",\n      \"assignee_role\": \"employee | manager | team\",\n      \"priority\": \"High | Medium | Low\",\n      \"due_date_offset_days\": 7,\n      \"department\": \"Department name if mentioned\"\n    }\n  ],\n  \"decisions_made\": [\"decision 1\", \"decision 2\", ...],\n  \"follow_up_required\": true,\n  \"next_meeting_date\": \"YYYY-MM-DD or null\"\n}\n\nReturn ONLY the JSON object, no additional text or markdown."
+            },
+            {
+              "role": "user",
+              "content": "=Meeting Title: {{ $json.summary }}\nMeeting Date: {{ $json.start.dateTime }}\nAttendees: {{ $json.attendees ? $json.attendees.map(a => a.displayName || a.email).join(', ') : 'Not specified' }}\n\nMeeting Transcript / Notes:\n{{ $json.description }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 2000
+        }
+      },
+      "id": "openai-analyze-transcript",
+      "name": "OpenAI: Analyze Transcript",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [900, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai-creds",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the OpenAI response and expand into one item per action item\nconst items = [];\n\nfor (const item of $input.all()) {\n  const rawContent = item.json.message?.content || item.json.choices?.[0]?.message?.content || '';\n\n  let analysisData;\n  try {\n    const cleaned = rawContent.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n    analysisData = JSON.parse(cleaned);\n  } catch (e) {\n    analysisData = {\n      meeting_summary: 'Unable to parse transcript',\n      key_insights: [],\n      action_items: [],\n      decisions_made: [],\n      follow_up_required: false,\n      next_meeting_date: null\n    };\n  }\n\n  const meetingEvent = item.json._meetingEvent || {};\n  const meetingDate = meetingEvent.start?.dateTime || new Date().toISOString();\n\n  const baseData = {\n    meeting_title: meetingEvent.summary || 'Meeting',\n    meeting_date: meetingDate,\n    meeting_id: meetingEvent.id || '',\n    meeting_link: meetingEvent.htmlLink || '',\n    attendees: meetingEvent.attendees\n      ? meetingEvent.attendees.map(a => a.displayName || a.email).join(', ')\n      : '',\n    meeting_summary: analysisData.meeting_summary,\n    key_insights: (analysisData.key_insights || []).join(' | '),\n    decisions_made: (analysisData.decisions_made || []).join(' | '),\n    follow_up_required: analysisData.follow_up_required,\n    next_meeting_date: analysisData.next_meeting_date || null\n  };\n\n  if (analysisData.action_items && analysisData.action_items.length > 0) {\n    for (const actionItem of analysisData.action_items) {\n      const dueDate = new Date(meetingDate);\n      dueDate.setDate(dueDate.getDate() + (actionItem.due_date_offset_days || 7));\n\n      items.push({\n        json: {\n          ...baseData,\n          task_title: actionItem.title,\n          task_description: actionItem.description,\n          assignee_name: actionItem.assignee_name,\n          assignee_role: actionItem.assignee_role || 'employee',\n          priority: actionItem.priority || 'Medium',\n          due_date: dueDate.toISOString().split('T')[0],\n          department: actionItem.department || ''\n        }\n      });\n    }\n  } else {\n    items.push({\n      json: {\n        ...baseData,\n        task_title: null,\n        task_description: null,\n        assignee_name: null,\n        assignee_role: null,\n        priority: null,\n        due_date: null,\n        department: ''\n      }\n    });\n  }\n}\n\nreturn items;"
+      },
+      "id": "parse-action-items",
+      "name": "Parse Action Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-task",
+              "leftValue": "={{ $json.task_title }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "filter-has-action-items",
+      "name": "Filter: Has Action Items",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "objectType": "Contact",
+        "conditionsUi": {
+          "conditionValues": [
+            {
+              "field": "Name",
+              "value": "={{ $json.assignee_name }}"
+            }
+          ]
+        }
+      },
+      "id": "salesforce-lookup-contact",
+      "name": "Salesforce: Lookup Assignee",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [1560, 200],
+      "credentials": {
+        "salesforceOAuth2Api": {
+          "id": "salesforce-creds",
+          "name": "Salesforce OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge the Salesforce Contact ID back into the action item\nconst actionItem = $('Filter: Has Action Items').first().json;\nconst contacts = $input.all();\n\nconst assigneeId = (contacts.length > 0 && contacts[0].json.Id)\n  ? contacts[0].json.Id\n  : null;\n\nreturn [{\n  json: {\n    ...actionItem,\n    salesforce_assignee_id: assigneeId\n  }\n}];"
+      },
+      "id": "merge-assignee-id",
+      "name": "Merge Assignee ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 200]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "objectType": "Task",
+        "additionalFields": {
+          "Subject": "={{ $json.task_title }}",
+          "Description": "=Action Item from Meeting: {{ $json.meeting_title }} ({{ $json.meeting_date }})\n\n{{ $json.task_description }}\n\nMeeting Summary: {{ $json.meeting_summary }}\n\nKey Insights: {{ $json.key_insights }}\n\nDecisions Made: {{ $json.decisions_made }}\n\nMeeting Link: {{ $json.meeting_link }}",
+          "Priority": "={{ $json.priority }}",
+          "Status": "Not Started",
+          "ActivityDate": "={{ $json.due_date }}",
+          "WhoId": "={{ $json.salesforce_assignee_id || '' }}",
+          "OwnerId": "={{ $json.salesforce_assignee_id || $vars.SALESFORCE_DEFAULT_OWNER_ID }}",
+          "Type": "Meeting Follow-up"
+        }
+      },
+      "id": "salesforce-create-task",
+      "name": "Salesforce: Create Task",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [2000, 200],
+      "credentials": {
+        "salesforceOAuth2Api": {
+          "id": "salesforce-creds",
+          "name": "Salesforce OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $vars.GOOGLE_SHEETS_SPREADSHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Action Items",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{ $now.toISO() }}",
+            "Meeting Title": "={{ $json.meeting_title }}",
+            "Meeting Date": "={{ $json.meeting_date }}",
+            "Attendees": "={{ $json.attendees }}",
+            "Meeting Summary": "={{ $json.meeting_summary }}",
+            "Key Insights": "={{ $json.key_insights }}",
+            "Decisions Made": "={{ $json.decisions_made }}",
+            "Task Title": "={{ $json.task_title }}",
+            "Task Description": "={{ $json.task_description }}",
+            "Assignee Name": "={{ $json.assignee_name }}",
+            "Assignee Role": "={{ $json.assignee_role }}",
+            "Priority": "={{ $json.priority }}",
+            "Due Date": "={{ $json.due_date }}",
+            "Department": "={{ $json.department }}",
+            "Salesforce Task ID": "={{ $json.id || '' }}",
+            "Status": "Not Started",
+            "Follow-up Required": "={{ $json.follow_up_required }}",
+            "Next Meeting Date": "={{ $json.next_meeting_date || '' }}",
+            "Meeting Link": "={{ $json.meeting_link }}"
+          }
+        },
+        "matchingColumns": ["Meeting Title", "Task Title"]
+      },
+      "id": "google-sheets-log",
+      "name": "Google Sheets: Log Action Items",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2220, 200],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-creds",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $vars.GOOGLE_SHEETS_SPREADSHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Meeting Summaries",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{ $now.toISO() }}",
+            "Meeting Title": "={{ $json.meeting_title }}",
+            "Meeting Date": "={{ $json.meeting_date }}",
+            "Meeting ID": "={{ $json.meeting_id }}",
+            "Attendees": "={{ $json.attendees }}",
+            "Summary": "={{ $json.meeting_summary }}",
+            "Key Insights": "={{ $json.key_insights }}",
+            "Decisions Made": "={{ $json.decisions_made }}",
+            "Follow-up Required": "={{ $json.follow_up_required }}",
+            "Next Meeting Date": "={{ $json.next_meeting_date || '' }}",
+            "Meeting Link": "={{ $json.meeting_link }}"
+          }
+        }
+      },
+      "id": "google-sheets-meeting-summary",
+      "name": "Google Sheets: Log Meeting Summary",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1340, 460],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-creds",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "meeting-transcript",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-transcript",
+      "name": "Webhook: Receive Transcript",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 580],
+      "webhookId": "meeting-transcript-webhook",
+      "notes": "Alternative trigger: POST a meeting transcript directly via webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize webhook payload into the same shape as a Google Calendar event\nconst body = $input.first().json.body || $input.first().json;\n\nreturn [{\n  json: {\n    id: body.meeting_id || `manual-${Date.now()}`,\n    summary: body.meeting_title || body.title || 'Manual Meeting Transcript',\n    description: body.transcript || body.description || '',\n    start: { dateTime: body.meeting_date || new Date().toISOString() },\n    end: { dateTime: body.meeting_end_date || new Date().toISOString() },\n    htmlLink: body.meeting_link || '',\n    attendees: (body.attendees || []).map(a =>\n      typeof a === 'string' ? { email: a, displayName: a } : a\n    )\n  }\n}];"
+      },
+      "id": "normalize-webhook-payload",
+      "name": "Normalize Webhook Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 580]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, message: 'Transcript received and processing started', workflow_execution_id: $execution.id } }}"
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [460, 720]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "objectType": "Task",
+        "conditionsUi": {
+          "conditionValues": [
+            {
+              "field": "Type",
+              "value": "Meeting Follow-up"
+            }
+          ]
+        },
+        "additionalFields": {
+          "fields": [
+            "Id",
+            "Subject",
+            "Status",
+            "Priority",
+            "ActivityDate",
+            "OwnerId",
+            "Description",
+            "LastModifiedDate",
+            "CreatedDate"
+          ]
+        }
+      },
+      "id": "salesforce-get-tasks-progress",
+      "name": "Salesforce: Get All Meeting Tasks",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [240, 860],
+      "credentials": {
+        "salesforceOAuth2Api": {
+          "id": "salesforce-creds",
+          "name": "Salesforce OAuth2"
+        }
+      },
+      "notes": "Scheduled separately: syncs task progress from Salesforce to Google Sheets"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $vars.GOOGLE_SHEETS_SPREADSHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Task Progress",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Last Updated": "={{ $now.toISO() }}",
+            "Salesforce Task ID": "={{ $json.Id }}",
+            "Task Subject": "={{ $json.Subject }}",
+            "Status": "={{ $json.Status }}",
+            "Priority": "={{ $json.Priority }}",
+            "Due Date": "={{ $json.ActivityDate }}",
+            "Created Date": "={{ $json.CreatedDate }}",
+            "Last Modified": "={{ $json.LastModifiedDate }}"
+          }
+        },
+        "matchingColumns": ["Salesforce Task ID"]
+      },
+      "id": "google-sheets-sync-progress",
+      "name": "Google Sheets: Sync Task Progress",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [460, 860],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-creds",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Recently Ended Meetings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Recently Ended Meetings": {
+      "main": [
+        [
+          {
+            "node": "Filter: Has Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter: Has Transcript": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Analyze Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Analyze Transcript": {
+      "main": [
+        [
+          {
+            "node": "Parse Action Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Action Items": {
+      "main": [
+        [
+          {
+            "node": "Filter: Has Action Items",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Sheets: Log Meeting Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter: Has Action Items": {
+      "main": [
+        [
+          {
+            "node": "Salesforce: Lookup Assignee",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salesforce: Lookup Assignee": {
+      "main": [
+        [
+          {
+            "node": "Merge Assignee ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Assignee ID": {
+      "main": [
+        [
+          {
+            "node": "Salesforce: Create Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salesforce: Create Task": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Log Action Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Receive Transcript": {
+      "main": [
+        [
+          {
+            "node": "Normalize Webhook Payload",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Webhook Payload": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Analyze Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salesforce: Get All Meeting Tasks": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Sync Task Progress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    { "name": "salesforce" },
+    { "name": "automation" },
+    { "name": "openai" },
+    { "name": "google-calendar" },
+    { "name": "google-sheets" }
+  ],
+  "versionId": "1.0.0"
+}

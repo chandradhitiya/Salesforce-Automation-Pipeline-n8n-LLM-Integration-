@@ -1,0 +1,26 @@
+{
+  "name": "salesforce-automation-pipeline",
+  "version": "1.0.0",
+  "description": "AI-powered meeting transcript automation pipeline integrating n8n, Salesforce CRM, Google Calendar, and Google Sheets",
+  "scripts": {
+    "validate": "node scripts/validate_setup.js",
+    "submit-transcript": "node scripts/process_transcript.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "n8n",
+    "salesforce",
+    "openai",
+    "google-calendar",
+    "google-sheets",
+    "automation",
+    "meeting-transcripts",
+    "workflow"
+  ],
+  "license": "MIT"
+}
